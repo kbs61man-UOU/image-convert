@@ -32,15 +32,24 @@ def check_password():
     """secrets.toml(로컬) 또는 Streamlit Cloud의 Secrets 설정에 저장된 비밀번호와 비교.
     맞으면 True를 반환하고, 이후 세션 동안은 다시 묻지 않음."""
 
+    if st.session_state.get("password_correct"):
+        return True
+
+    # ⚠️ 소싱도구의 '이미지가공 툴 열기' 바로가기 링크에서 ?pw=비밀번호 형태로
+    # URL에 비밀번호를 실어 보내면, 매번 손으로 입력하지 않고 자동으로 로그인됩니다.
+    # (편의를 위한 기능입니다 — URL에 비밀번호가 그대로 노출되니, 이 링크를 다른
+    #  사람과 공유하거나 공용 컴퓨터의 브라우저 기록에 남기지 않도록 주의하세요.)
+    qp_pw = st.query_params.get("pw")
+    if qp_pw is not None and qp_pw == st.secrets.get("password"):
+        st.session_state["password_correct"] = True
+        return True
+
     def password_entered():
         if st.session_state.get("password") == st.secrets.get("password"):
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
-
-    if st.session_state.get("password_correct"):
-        return True
 
     st.title("🔒 로그인")
     st.text_input("비밀번호를 입력하세요", type="password", on_change=password_entered, key="password")
