@@ -618,6 +618,78 @@ market_size = MARKET_SIZE_OPTIONS[market_size_label]
 
 uploaded_files = st.file_uploader("상품 이미지 파일을 선택하세요 (다중 선택 가능)", type=['png', 'jpg', 'jpeg'], accept_multiple_files=True)
 
+
+# =========================================================
+# 소싱도구에서 넘어온 이미지 (?img=<주소>)
+# =========================================================
+# 소싱도구가 상품 페이지에서 가장 큰 원본을 찾아 그 주소를 넘겨줍니다.
+# 내려받아 다시 올리는 왕복을 없애려고 주소를 직접 받아 처리합니다.
+# ⚠️ 이 앱은 Streamlit Cloud(외부 서버)에서 돌기 때문에, 상품 사이트가
+#    외부 접근을 막아두면 못 받아올 수 있습니다. 그때는 실패를 감추지 않고
+#    알려주고, 평소처럼 파일 업로드로 진행하시게 안내합니다.
+
+class _UrlImage(io.BytesIO):
+    """업로드된 파일처럼 쓰기 위한 래퍼 (Image.open과 .name 둘 다 필요)."""
+    def __init__(self, data: bytes, name: str):
+        super().__init__(data)
+        self.name = name
+
+
+def _image_from_url_param():
+    try:
+        val = st.query_params.get("img", "")
+        if isinstance(val, (list, tuple)):
+            val = val[0] if val else ""
+    except Exception:
+        try:
+            vals = st.experimental_get_query_params().get("img") or []
+            val = vals[0] if vals else ""
+        except Exception:
+            val = ""
+    url = str(val or "").strip()
+    if not url:
+        return None, ""
+
+    cache = st.session_state.setdefault("_url_img_cache", {})
+    if url in cache:
+        data, err = cache[url]
+    else:
+        try:
+            import requests
+            resp = requests.get(url, timeout=15,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            resp.raise_for_status()
+            data, err = resp.content, ""
+        except Exception as e:
+            data, err = None, f"{type(e).__name__}: {e}"
+        cache[url] = (data, err)
+
+    if not data:
+        return None, err
+    name = os.path.basename(url.split("?")[0]) or "sourced.jpg"
+    if not re.search(r"\.(png|jpe?g|webp)$", name, re.I):
+        name += ".jpg"
+    return _UrlImage(data, name), ""
+
+
+_url_img, _url_img_err = _image_from_url_param()
+if _url_img is not None and not uploaded_files:
+    uploaded_files = [_url_img]
+    try:
+        _w, _h = Image.open(_url_img).size
+        _url_img.seek(0)
+        st.success(
+            f"소싱도구에서 넘어온 원본을 불러왔습니다 — **{_w}×{_h}px** "
+            f"({_url_img.name}). 아래에서 바로 가공하시면 됩니다.", icon="✅")
+    except Exception:
+        st.success("소싱도구에서 넘어온 이미지를 불러왔습니다.", icon="✅")
+elif _url_img_err:
+    st.warning(
+        f"소싱도구에서 넘어온 주소로 이미지를 받지 못했습니다 ({_url_img_err}). "
+        "상품 사이트가 외부 서버의 접근을 막는 경우입니다 — 그 주소를 "
+        "브라우저에서 직접 열어 저장하신 뒤, 위에서 파일로 올려주세요.",
+        icon="⚠️")
+
 if uploaded_files:
     file_count = len(uploaded_files)
     st.write(f"총 **{file_count}**개의 파일이 업로드되었습니다.")
@@ -662,6 +734,13 @@ if uploaded_files:
                     if market_size <= 0:
                         return im
                     return fit_to_square(im, 420)[0]
+                # 같은 파일 객체를 미리보기·본처리에서 각각 열기 때문에
+                # 읽기 위치를 매번 처음으로 되돌립니다(소싱도구에서 주소로
+                # 받아온 이미지는 재사용되는 하나의 스트림입니다).
+                try:
+                    uploaded_files[0].seek(0)
+                except Exception:
+                    pass
                 preview_src_full = normalize_to_rgb(Image.open(uploaded_files[0]))
                 # 미리보기는 원본 해상도로 계산할 필요가 없음 - 큰 사진(특히 폰 카메라 원본)을 그대로
                 # 쓰면 업로드/슬라이더 조작마다 몇 초씩 걸려 화면이 멈춘 것처럼 보이는 원인이 됨.
@@ -729,6 +808,10 @@ if uploaded_files:
                     zip_file.writestr(f"{base_name}_{suffix}.jpg", buf.getvalue())
 
                 try:
+                    try:
+                        uploaded_file.seek(0)
+                    except Exception:
+                        pass
                     orig_img = Image.open(uploaded_file)
                     original = normalize_to_rgb(orig_img)
                     tight = tighten_to_content(original)
