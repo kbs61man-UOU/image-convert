@@ -28,12 +28,42 @@ st.set_page_config(page_title="오픈마켓 상품 이미지 맞춤 가공 툴",
 # 비밀번호 로그인 (배포 후 아무나 URL로 접속하지 못하도록)
 # =========================================================
 
+def _password_from_url():
+    """
+    주소 뒤에 붙은 ?pw=... 값을 읽습니다.
+
+    ⚠️ Streamlit 버전에 따라 쿼리 파라미터 API가 다릅니다
+       (1.30 이후 st.query_params / 그 이전 st.experimental_get_query_params).
+       배포 환경 버전에 따라 한쪽만 있을 수 있어 둘 다 시도합니다.
+    """
+    try:
+        val = st.query_params.get("pw", "")
+        if isinstance(val, (list, tuple)):
+            val = val[0] if val else ""
+        return str(val or "")
+    except Exception:
+        pass
+    try:
+        vals = st.experimental_get_query_params().get("pw") or []
+        return str(vals[0]) if vals else ""
+    except Exception:
+        return ""
+
+
 def check_password():
     """secrets.toml(로컬) 또는 Streamlit Cloud의 Secrets 설정에 저장된 비밀번호와 비교.
-    맞으면 True를 반환하고, 이후 세션 동안은 다시 묻지 않음."""
+    맞으면 True를 반환하고, 이후 세션 동안은 다시 묻지 않음.
+
+    ⚠️ 소싱도구에서 '이미지가공 툴 열기'로 넘어올 때는 주소에 ?pw=... 가
+       붙어 있습니다. 예전에는 이 값을 읽는 코드가 아예 없어서, 링크로
+       들어와도 매번 비밀번호를 다시 물었습니다. 이제 URL의 값이 맞으면
+       바로 통과시킵니다.
+       (비밀번호가 주소에 노출되므로 브라우저 기록에 남습니다 — 외부 유출이
+        곤란한 자료를 다루는 툴이 아니라 편의를 택했습니다.)
+    """
 
     def password_entered():
-        if st.session_state.get("password") == st.secrets.get("password"):
+        if str(st.session_state.get("password", "")) == str(st.secrets.get("password", "")):
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
@@ -42,10 +72,19 @@ def check_password():
     if st.session_state.get("password_correct"):
         return True
 
+    # 1) 주소로 넘어온 비밀번호로 자동 로그인
+    url_pw = _password_from_url()
+    if url_pw and url_pw == str(st.secrets.get("password", "")):
+        st.session_state["password_correct"] = True
+        return True
+
+    # 2) 안 맞거나 없으면 직접 입력
     st.title("🔒 로그인")
     st.text_input("비밀번호를 입력하세요", type="password", on_change=password_entered, key="password")
     if st.session_state.get("password_correct") is False:
         st.error("비밀번호가 올바르지 않습니다.")
+    elif url_pw:
+        st.warning("주소에 붙은 비밀번호가 맞지 않습니다. 직접 입력해주세요.", icon="⚠️")
     return False
 
 
