@@ -32,24 +32,15 @@ def check_password():
     """secrets.toml(로컬) 또는 Streamlit Cloud의 Secrets 설정에 저장된 비밀번호와 비교.
     맞으면 True를 반환하고, 이후 세션 동안은 다시 묻지 않음."""
 
-    if st.session_state.get("password_correct"):
-        return True
-
-    # ⚠️ 소싱도구의 '이미지가공 툴 열기' 바로가기 링크에서 ?pw=비밀번호 형태로
-    # URL에 비밀번호를 실어 보내면, 매번 손으로 입력하지 않고 자동으로 로그인됩니다.
-    # (편의를 위한 기능입니다 — URL에 비밀번호가 그대로 노출되니, 이 링크를 다른
-    #  사람과 공유하거나 공용 컴퓨터의 브라우저 기록에 남기지 않도록 주의하세요.)
-    qp_pw = st.query_params.get("pw")
-    if qp_pw is not None and qp_pw == st.secrets.get("password"):
-        st.session_state["password_correct"] = True
-        return True
-
     def password_entered():
         if st.session_state.get("password") == st.secrets.get("password"):
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct"):
+        return True
 
     st.title("🔒 로그인")
     st.text_input("비밀번호를 입력하세요", type="password", on_change=password_entered, key="password")
@@ -77,6 +68,53 @@ def normalize_to_rgb(orig_img):
         white_bg = Image.new("RGBA", rgba_img.size, (255, 255, 255, 255))
         return Image.alpha_composite(white_bg, rgba_img).convert("RGB")
     return orig_img.convert("RGB")
+
+
+# =========================================================
+# 오픈마켓 출력 규격 맞추기
+# =========================================================
+# ⚠️ 오픈마켓 대표이미지는 정사각형 1,000x1,000이 표준입니다(쿠팡 기준:
+#    권장 1,000x1,000 / 최소 500px 이상 / 10MB 이하 JPG·PNG).
+#    규격에 못 미치면 마켓이 "이미지를 추출할 수 없습니다. 올바른 URL 주소를
+#    입력해주세요"라는 엉뚱한 메시지로 거절해서, URL이 잘못된 줄 알고 한참
+#    헤매게 됩니다(실제로 441x775 결과물로 겪은 일).
+#
+#    효과마다 캔버스 크기가 제각각(반사는 세로로 길고, 포개기는 가로로 넓음)
+#    이라 효과별로 맞추면 관리가 어렵습니다. 그래서 저장 직전에 한 곳에서만
+#    규격을 맞춥니다 — 나중에 효과를 추가해도 자동으로 적용됩니다.
+
+MARKET_SIZE_OPTIONS = {
+    "1000 x 1000 (오픈마켓 표준)": 1000,
+    "1200 x 1200 (조금 더 크게)": 1200,
+    "원본 크기 유지 (규격 안 맞춤)": 0,
+}
+
+
+def fit_to_square(im, size=1000, bg=(255, 255, 255)):
+    """
+    비율을 유지한 채 가장 긴 변을 size에 맞추고, 남는 여백은 흰색으로 채워
+    정사각형으로 만듭니다.
+
+    반환: (정사각형 이미지, 확대되었는지 여부)
+      - 확대 여부를 같이 돌려주는 이유: 원본이 작으면 없는 픽셀을 지어내는
+        확대가 일어나 화질이 뭉개집니다. 이건 코드로 해결할 수 없고 더 큰
+        원본으로 다시 찍는 수밖에 없어서, 사용자에게 알려줘야 합니다.
+    """
+    im = im.convert("RGB")
+    w, h = im.size
+    if size <= 0:
+        return im, False
+    if (w, h) == (size, size):
+        return im, False
+
+    ratio = min(size / w, size / h)
+    new_w, new_h = max(1, round(w * ratio)), max(1, round(h * ratio))
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    resized = im.resize((new_w, new_h), resample)
+
+    canvas = Image.new("RGB", (size, size), bg)
+    canvas.paste(resized, ((size - new_w) // 2, (size - new_h) // 2))
+    return canvas, ratio > 1.0
 
 
 @st.cache_data(show_spinner=False)
@@ -525,6 +563,15 @@ persp_scale = st.sidebar.slider("뒤 제품 축소 비율 (%)", 80, 100, 92, key
 st.sidebar.subheader("기타 옵션")
 opt_tight_double = st.sidebar.checkbox("상품 2개 초밀착 나란히 배치", value=False, key="opt_tight_double")
 
+st.sidebar.subheader("📐 저장 규격")
+market_size_label = st.sidebar.selectbox(
+    "출력 크기", list(MARKET_SIZE_OPTIONS.keys()), index=0, key="market_size",
+    help="오픈마켓 대표이미지는 정사각형 1,000x1,000이 표준입니다. "
+         "규격에 못 미치면 마켓이 '올바른 URL을 입력해주세요'라는 엉뚱한 "
+         "메시지로 거절합니다.",
+)
+market_size = MARKET_SIZE_OPTIONS[market_size_label]
+
 
 # =========================================================
 # 미리보기 (첫 번째 업로드 이미지로 슬라이더 값을 즉시 확인)
@@ -547,9 +594,35 @@ if uploaded_files:
                 val = st.text_input(f"{f.name}", value=default_stack_count, key=f"stack_count_{i}")
                 stack_counts.append(val)
 
+    # 원본 해상도 점검 — 작으면 결과물이 확대되어 뭉개지므로 미리 알려줍니다.
+    if market_size > 0:
+        _small_srcs = []
+        for f in uploaded_files:
+            try:
+                _w, _h = Image.open(f).size
+                f.seek(0)  # 아래에서 다시 읽어야 하므로 포인터를 되돌립니다
+                if min(_w, _h) < market_size:
+                    _small_srcs.append(f"{f.name} ({_w}×{_h})")
+            except Exception:
+                pass
+        if _small_srcs:
+            st.warning(
+                f"⚠️ **원본이 {market_size}px보다 작은 파일이 {len(_small_srcs)}개 있습니다.** "
+                "결과물은 규격에 맞게 저장되지만, 모자란 만큼 확대되어 화질이 뭉개집니다. "
+                "가능하면 더 큰 원본으로 올려주세요 (스크린샷보다 원본 사진이 낫습니다).\n\n"
+                + "\n".join(f"- {s}" for s in _small_srcs[:10]),
+                icon="⚠️",
+            )
+
     with st.expander("🔍 첫 번째 이미지로 미리보기 (슬라이더 조정 시 자동 갱신)", expanded=True):
         try:
             with st.spinner("미리보기 생성 중..."):
+                # 미리보기도 저장될 때와 같은 정사각형 프레임으로 보여줍니다
+                # (보이는 것과 저장되는 것이 다르면 미리보기의 의미가 없습니다).
+                def _preview(im):
+                    if market_size <= 0:
+                        return im
+                    return fit_to_square(im, 420)[0]
                 preview_src_full = normalize_to_rgb(Image.open(uploaded_files[0]))
                 # 미리보기는 원본 해상도로 계산할 필요가 없음 - 큰 사진(특히 폰 카메라 원본)을 그대로
                 # 쓰면 업로드/슬라이더 조작마다 몇 초씩 걸려 화면이 멈춘 것처럼 보이는 원인이 됨.
@@ -563,31 +636,31 @@ if uploaded_files:
                 if opt_reflection:
                     refl_src = arrange_side_by_side(preview_tight, reflect_count, reflect_gap / 100) if reflect_count > 1 else preview_src
                     row1[0].markdown("**1. 미러 반사효과**")
-                    row1[0].image(apply_mirror_reflection(refl_src, reflect_ratio, reflect_opacity, reflect_falloff))
+                    row1[0].image(_preview(apply_mirror_reflection(refl_src, reflect_ratio, reflect_opacity, reflect_falloff)))
                 if opt_stack:
                     row1[1].markdown("**2. 포개기 효과**")
-                    row1[1].image(
+                    row1[1].image(_preview(
                         apply_stack_fan(preview_tight, preview_count, stack_cols, stack_overlap, stack_angle, rise_ratio=stack_rise / 100, scale_step=stack_depth_scale / 100)
-                    )
+                    ))
                 if opt_pastel:
                     row1[2].markdown("**3. 파스텔 배경**")
-                    row1[2].image(
+                    row1[2].image(_preview(
                         apply_pastel_bg(preview_tight, pastel_size, pastel_size, pastel_angle, lighten_amount=pastel_lighten / 100, shadow_shape=pastel_shadow_shape)
-                    )
+                    ))
 
                 row2 = st.columns(3)
                 if opt_dark:
                     row2[0].markdown("**4. 스튜디오톤 배경**")
-                    row2[0].image(
+                    row2[0].image(_preview(
                         apply_studio_dark_bg(preview_tight, dark_count, dark_gap / 100, reflect_opacity=dark_reflect_opacity,
                                               wall_bright=dark_wall_bright, floor_bright=dark_floor_bright,
                                               horizon_ratio=dark_horizon / 100, grain=dark_grain)
-                    )
+                    ))
                 if opt_perspective:
                     row2[1].markdown("**5. 원근감 포개기**")
-                    row2[1].image(
+                    row2[1].image(_preview(
                         apply_perspective_fan(preview_tight, persp_count, persp_rotate, persp_scale / 100, persp_dx / 100, persp_dy / 100)
-                    )
+                    ))
         except Exception as e:
             st.warning(f"미리보기 생성 실패: {e}")
 
@@ -596,6 +669,7 @@ if uploaded_files:
         progress_bar = st.progress(0)
         status_text = st.empty()
         total_files = len(uploaded_files)
+        upscale_warnings = []  # 원본이 작아 확대된 결과물 목록 (아래에서 안내)
 
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for idx, uploaded_file in enumerate(uploaded_files):
@@ -606,8 +680,13 @@ if uploaded_files:
                 progress_bar.progress((idx + 1) / total_files)
 
                 def save_to_zip(im, suffix):
+                    # 모든 효과가 이 함수를 거쳐 저장되므로, 규격 맞추기는
+                    # 여기 한 곳에서만 합니다 (효과를 추가해도 자동 적용).
+                    squared, upscaled = fit_to_square(im, market_size)
+                    if upscaled:
+                        upscale_warnings.append(f"{file_name} → {suffix}")
                     buf = io.BytesIO()
-                    im.convert("RGB").save(buf, format="JPEG", quality=95)
+                    squared.save(buf, format="JPEG", quality=95)
                     zip_file.writestr(f"{base_name}_{suffix}.jpg", buf.getvalue())
 
                 try:
@@ -658,6 +737,20 @@ if uploaded_files:
 
         progress_bar.empty()
         status_text.empty()
+
+        # 확대가 일어난 결과물 안내 — 코드로는 해결할 수 없고 더 큰 원본으로
+        # 다시 만드는 수밖에 없어서, 그냥 넘어가지 않고 분명히 알려줍니다.
+        if upscale_warnings:
+            st.warning(
+                f"⚠️ **원본이 작아 {len(upscale_warnings)}개 결과물이 확대되었습니다.** "
+                f"규격({market_size}×{market_size})은 맞췄으니 마켓에 등록은 되지만, "
+                "없는 픽셀을 늘린 것이라 화질이 다소 뭉개집니다. 더 선명하게 하시려면 "
+                "**더 큰 원본 사진**으로 다시 만들어주세요 "
+                f"(가로·세로 모두 {market_size}px 이상 권장, 휴대폰 카메라 원본이면 충분합니다).\n\n"
+                + "\n".join(f"- {w}" for w in upscale_warnings[:10])
+                + (f"\n- … 외 {len(upscale_warnings) - 10}개" if len(upscale_warnings) > 10 else ""),
+                icon="⚠️",
+            )
 
         zip_buffer.seek(0)
 
